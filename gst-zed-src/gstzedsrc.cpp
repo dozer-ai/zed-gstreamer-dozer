@@ -2315,7 +2315,7 @@ static gboolean gst_zedsrc_start(GstBaseSrc *bsrc) {
     if (src->svo_file.len != 0) {
         sl::String svo(static_cast<char *>(src->svo_file.str));
         init_params.input.setFromSVOFile(svo);
-        init_params.svo_real_time_mode = true;
+        init_params.svo_real_time_mode = false;
 
         GST_INFO(" * Input SVO filename: %s", src->svo_file.str);
     } else if (src->camera_id != DEFAULT_PROP_CAM_ID) {
