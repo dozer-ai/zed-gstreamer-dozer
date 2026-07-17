@@ -621,6 +621,8 @@ static GType gst_zedsrc_depth_mode_get_type(void) {
              "More accurate Neural disparity estimation, Requires AI module.", "NEURAL_PLUS"},
             {static_cast<gint>(sl::DEPTH_MODE::NEURAL),
              "End to End Neural disparity estimation, requires AI module", "NEURAL"},
+            {static_cast<gint>(sl::DEPTH_MODE::NEURAL_LIGHT),
+             "Lighter Neural disparity estimation, requires AI module", "NEURAL_LIGHT"},
             {static_cast<gint>(sl::DEPTH_MODE::ULTRA),
              "Computation mode favorising edges and sharpness. Requires more GPU memory and "
              "computation power.",
