@@ -2767,6 +2767,15 @@ static GstFlowReturn gst_zedsrc_fill(GstPushSrc *psrc, GstBuffer *buf) {
     // ----> ZED grab
     ret = src->zed.grab(zedRtParams);
 
+    // Reaching the end of an SVO playback is a normal end-of-stream, not a failure.
+    // Return GST_FLOW_EOS so GstBaseSrc emits a proper EOS event downstream, which lets
+    // muxers (e.g. mp4mux) finalize their output; returning GST_FLOW_ERROR here instead
+    // tears the pipeline down without EOS and leaves the file unfinalized/unplayable.
+    if (ret == sl::ERROR_CODE::END_OF_SVOFILE_REACHED) {
+        GST_INFO_OBJECT(src, "End of SVO file reached, sending EOS");
+        return GST_FLOW_EOS;
+    }
+
     if (ret > sl::ERROR_CODE::SUCCESS) {
         GST_ELEMENT_ERROR(src, RESOURCE, FAILED,
                           ("Grabbing failed with error: '%s' - %s", sl::toString(ret).c_str(),
