@@ -60,6 +60,7 @@ enum {
     PROP_CAM_ID,
     PROP_CAM_SN,
     PROP_SVO_FILE,
+    PROP_SVO_REAL_TIME_MODE,
     PROP_OPENCV_CALIB_FILE,
     PROP_STREAM_IP,
     PROP_STREAM_PORT,
@@ -239,6 +240,7 @@ typedef enum {
 #define DEFAULT_PROP_CAM_ID         0
 #define DEFAULT_PROP_CAM_SN         0
 #define DEFAULT_PROP_SVO_FILE       ""
+#define DEFAULT_PROP_SVO_REAL_TIME_MODE  TRUE
 #define DEFAULT_PROP_OPENCV_CALIB_FILE       ""
 #define DEFAULT_PROP_STREAM_IP      ""
 #define DEFAULT_PROP_STREAM_PORT    30000
@@ -860,7 +862,17 @@ static void gst_zedsrc_class_init(GstZedSrcClass *klass) {
         g_param_spec_string("svo-file-path", "SVO file", "Input from SVO file",
                             DEFAULT_PROP_SVO_FILE,
                             (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
-    
+
+    g_object_class_install_property(
+        gobject_class, PROP_SVO_REAL_TIME_MODE,
+        g_param_spec_boolean("svo-real-time-mode", "SVO real-time mode",
+                             "When playing an SVO, pace grabs to the recorded framerate (TRUE, "
+                             "drops frames if downstream can't keep up) or grab every frame as "
+                             "fast as possible (FALSE, no frame drops -- use for offline "
+                             "processing where every frame must be handled)",
+                             DEFAULT_PROP_SVO_REAL_TIME_MODE,
+                             (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+
     g_object_class_install_property(
         gobject_class, PROP_OPENCV_CALIB_FILE,
         g_param_spec_string("opencv-calibration-file", "Optional OpenCV Calibration File", "Optional OpenCV Calibration File", 
@@ -1447,6 +1459,7 @@ static void gst_zedsrc_init(GstZedSrc *src) {
     src->camera_id = DEFAULT_PROP_CAM_ID;
     src->camera_sn = DEFAULT_PROP_CAM_SN;
     src->svo_file = *g_string_new(DEFAULT_PROP_SVO_FILE);
+    src->svo_real_time_mode = DEFAULT_PROP_SVO_REAL_TIME_MODE;
     src->opencv_calibration_file = *g_string_new(DEFAULT_PROP_OPENCV_CALIB_FILE);
     src->stream_ip = *g_string_new(DEFAULT_PROP_STREAM_IP);
 
@@ -1575,6 +1588,9 @@ void gst_zedsrc_set_property(GObject *object, guint property_id, const GValue *v
     case PROP_SVO_FILE:
         str = g_value_get_string(value);
         src->svo_file = *g_string_new(str);
+        break;
+    case PROP_SVO_REAL_TIME_MODE:
+        src->svo_real_time_mode = g_value_get_boolean(value);
         break;
     case PROP_OPENCV_CALIB_FILE:
         str = g_value_get_string(value);
@@ -1874,6 +1890,9 @@ void gst_zedsrc_get_property(GObject *object, guint property_id, GValue *value, 
         break;
     case PROP_SVO_FILE:
         g_value_set_string(value, src->svo_file.str);
+        break;
+    case PROP_SVO_REAL_TIME_MODE:
+        g_value_set_boolean(value, src->svo_real_time_mode);
         break;
     case PROP_OPENCV_CALIB_FILE:
         g_value_set_string(value, src->opencv_calibration_file.str);
@@ -2317,7 +2336,7 @@ static gboolean gst_zedsrc_start(GstBaseSrc *bsrc) {
     if (src->svo_file.len != 0) {
         sl::String svo(static_cast<char *>(src->svo_file.str));
         init_params.input.setFromSVOFile(svo);
-        init_params.svo_real_time_mode = true;
+        init_params.svo_real_time_mode = src->svo_real_time_mode;
 
         GST_INFO(" * Input SVO filename: %s", src->svo_file.str);
     } else if (src->camera_id != DEFAULT_PROP_CAM_ID) {
