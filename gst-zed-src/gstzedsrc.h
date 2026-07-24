@@ -54,6 +54,7 @@ struct _GstZedSrc {
     gint camera_id;
     gint64 camera_sn;
     GString svo_file;
+    gboolean svo_real_time_mode;   // SVO playback: real-time pacing (drops frames under load) vs process every frame
     GString opencv_calibration_file;
     GString stream_ip;
     gint stream_port;
