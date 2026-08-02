@@ -161,6 +161,17 @@ struct _GstZedSrc {
     guint out_framesize;
 
     gboolean stop_requested;
+
+    // ----> Grab status reporting (see gst_zedsrc_post_grab_status)
+    // Non-SUCCESS returns from open()/grab() are reported on the bus as
+    // "zedsrc-grab-status" element messages so the application can tell a link
+    // loss apart from a slow camera. Negative sl::ERROR_CODE values are
+    // warnings the SDK expects the caller to ride out, so they do not change
+    // the flow return; they were previously invisible.
+    gint last_grab_status;               // last sl::ERROR_CODE seen, as gint
+    guint32 grab_status_count;           // consecutive grabs with that status
+    GstClockTime grab_status_last_post;  // throttle: last time we posted
+    // <---- Grab status reporting
 };
 
 struct _GstZedSrcClass {

@@ -50,6 +50,8 @@ static gboolean gst_zedsrc_unlock_stop(GstBaseSrc *src);
 
 static GstFlowReturn gst_zedsrc_fill(GstPushSrc *src, GstBuffer *buf);
 
+static void gst_zedsrc_post_grab_status(GstZedSrc *src, sl::ERROR_CODE ret, const gchar *phase);
+
 enum {
     PROP_0,
     PROP_CAM_RES,
@@ -1424,6 +1426,12 @@ static void gst_zedsrc_reset(GstZedSrc *src) {
     src->last_frame_count = 0;
     src->total_dropped_frames = 0;
 
+    // A fresh open() should report its status even if the previous session ended
+    // on the same code, so start from SUCCESS with no throttle history.
+    src->last_grab_status = static_cast<gint>(sl::ERROR_CODE::SUCCESS);
+    src->grab_status_count = 0;
+    src->grab_status_last_post = GST_CLOCK_TIME_NONE;
+
     if (src->caps) {
         gst_caps_unref(src->caps);
         src->caps = NULL;
@@ -2339,6 +2347,8 @@ static gboolean gst_zedsrc_start(GstBaseSrc *bsrc) {
     // ----> Open camera
     ret = src->zed.open(init_params);
 
+    gst_zedsrc_post_grab_status(src, ret, "open");
+
     if (ret > sl::ERROR_CODE::SUCCESS) {
         GST_ELEMENT_ERROR(src, RESOURCE, NOT_FOUND,
                           ("Failed to open camera, '%s'", sl::toString(ret).c_str()), (NULL));
@@ -2698,6 +2708,74 @@ static gboolean gst_zedsrc_unlock_stop(GstBaseSrc *bsrc) {
     return TRUE;
 }
 
+// Re-post a persisting status at most this often, so a camera that is gone for
+// minutes does not put 15 messages/s on the bus.
+#define GST_ZEDSRC_STATUS_REPOST_NS (GST_SECOND * 2)
+
+// Report the outcome of an open()/grab() on the bus as a "zedsrc-grab-status"
+// element message.
+//
+// This exists because negative sl::ERROR_CODE values (CAMERA_REBOOTING = -1,
+// CORRUPTED_FRAME = -2, ...) are not errors in the SDK's sense: the caller is
+// expected to keep grabbing and ride them out. gst_zedsrc_fill() therefore does
+// not fail on them -- but that also meant they left no trace at all, so an
+// application could not distinguish "the GMSL link dropped" from "this camera is
+// running slow". A structured element message keeps the flow return untouched
+// while making the distinction available. Positive codes still raise
+// GST_ELEMENT_ERROR at the call site as before; they are posted here too so the
+// application sees one consistent status stream.
+//
+// The message is posted on entry to a status (including the return to SUCCESS,
+// which is the recovery signal), then re-posted on the throttle interval while
+// it persists. Fields:
+//   code        gint    : sl::ERROR_CODE as an integer
+//   name        string  : sl::toString(code)
+//   verbose     string  : sl::toVerbose(code)
+//   consecutive guint   : grabs in a row with this code (1 on entry)
+//   recovered   boolean : TRUE on the SUCCESS message that ends a bad run
+//   serial      guint64 : camera-sn property, 0 if unset
+static void gst_zedsrc_post_grab_status(GstZedSrc *src, sl::ERROR_CODE ret, const gchar *phase) {
+    gint code = static_cast<gint>(ret);
+    gboolean changed = (code != src->last_grab_status);
+    GstClockTime now = gst_util_get_timestamp();
+
+    if (changed) {
+        src->grab_status_count = 1;
+    } else if (src->grab_status_count < G_MAXUINT32) {
+        src->grab_status_count++;
+    }
+    src->last_grab_status = code;
+
+    // Steady-state SUCCESS is the normal case: say nothing.
+    if (!changed && ret == sl::ERROR_CODE::SUCCESS) {
+        return;
+    }
+    if (!changed && src->grab_status_last_post != GST_CLOCK_TIME_NONE &&
+        now - src->grab_status_last_post < GST_ZEDSRC_STATUS_REPOST_NS) {
+        return;
+    }
+    src->grab_status_last_post = now;
+
+    // changed && SUCCESS means we just came back from a non-SUCCESS run.
+    gboolean recovered = (ret == sl::ERROR_CODE::SUCCESS);
+
+    GST_INFO_OBJECT(src, "%s status: %s (%d) x%u", phase, sl::toString(ret).c_str(), code,
+                    src->grab_status_count);
+
+    gst_element_post_message(
+        GST_ELEMENT(src),
+        gst_message_new_element(GST_OBJECT(src),
+                                gst_structure_new("zedsrc-grab-status",
+                                                  "phase", G_TYPE_STRING, phase,
+                                                  "code", G_TYPE_INT, code,
+                                                  "name", G_TYPE_STRING, sl::toString(ret).c_str(),
+                                                  "verbose", G_TYPE_STRING, sl::toVerbose(ret).c_str(),
+                                                  "consecutive", G_TYPE_UINT, src->grab_status_count,
+                                                  "recovered", G_TYPE_BOOLEAN, recovered,
+                                                  "serial", G_TYPE_UINT64, (guint64)src->camera_sn,
+                                                  NULL)));
+}
+
 static GstFlowReturn gst_zedsrc_fill(GstPushSrc *psrc, GstBuffer *buf) {
     GstZedSrc *src = GST_ZED_SRC(psrc);
 
@@ -2764,6 +2842,8 @@ static GstFlowReturn gst_zedsrc_fill(GstPushSrc *psrc, GstBuffer *buf) {
 
     // ----> ZED grab
     ret = src->zed.grab(zedRtParams);
+
+    gst_zedsrc_post_grab_status(src, ret, "grab");
 
     if (ret > sl::ERROR_CODE::SUCCESS) {
         GST_ELEMENT_ERROR(src, RESOURCE, FAILED,
