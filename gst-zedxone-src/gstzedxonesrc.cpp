@@ -179,6 +179,9 @@ typedef enum {
 #define DEFAULT_PROP_EXPOSURE 10000
 #define DEFAULT_PROP_EXPOSURE_RANGE_MIN 1024
 #define DEFAULT_PROP_EXPOSURE_RANGE_MAX 66666
+
+// Sensor minimum; bound only, defaults unchanged.
+#define PROP_EXPOSURE_HW_MIN 28
 #define DEFAULT_PROP_EXP_COMPENSATION 50
 #define DEFAULT_PROP_AUTO_ANALOG_GAIN TRUE
 #define DEFAULT_PROP_ANALOG_GAIN 30000
@@ -655,7 +658,7 @@ static void gst_zedxonesrc_class_init(GstZedXOneSrcClass *klass) {
     g_object_class_install_property(
         gobject_class, PROP_EXPOSURE,
         g_param_spec_int("ctrl-exposure-time", "Camera control: Exposure time [µsec]",
-                         "Exposure time in microseconds", DEFAULT_PROP_EXPOSURE_RANGE_MIN,
+                         "Exposure time in microseconds", PROP_EXPOSURE_HW_MIN,
                          DEFAULT_PROP_EXPOSURE_RANGE_MAX, DEFAULT_PROP_EXPOSURE,
                          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
@@ -664,7 +667,7 @@ static void gst_zedxonesrc_class_init(GstZedXOneSrcClass *klass) {
         g_param_spec_int("ctrl-auto-exposure-range-min",
                          "Camera control: Minimum Exposure time [µsec]",
                          "Minimum exposure time in microseconds for the automatic exposure setting",
-                         DEFAULT_PROP_EXPOSURE_RANGE_MIN, DEFAULT_PROP_EXPOSURE_RANGE_MAX,
+                         PROP_EXPOSURE_HW_MIN, DEFAULT_PROP_EXPOSURE_RANGE_MAX,
                          DEFAULT_PROP_EXPOSURE_RANGE_MIN,
                          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
@@ -673,7 +676,7 @@ static void gst_zedxonesrc_class_init(GstZedXOneSrcClass *klass) {
         g_param_spec_int("ctrl-auto-exposure-range-max",
                          "Camera control: Maximum Exposure time [µsec]",
                          "Maximum exposure time in microseconds for the automatic exposure setting",
-                         DEFAULT_PROP_EXPOSURE_RANGE_MIN, DEFAULT_PROP_EXPOSURE_RANGE_MAX,
+                         PROP_EXPOSURE_HW_MIN, DEFAULT_PROP_EXPOSURE_RANGE_MAX,
                          DEFAULT_PROP_EXPOSURE_RANGE_MAX,
                          (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
@@ -886,6 +889,35 @@ static void gst_zedxonesrc_init(GstZedXOneSrc *src) {
     gst_zedxonesrc_reset(src);
 }
 
+// Push one setCameraSettings call to the live instance; no-op until the camera
+// is open, when start() pushes the cached value instead.
+#define LIVE_APPLY1(ENUM_VAL, V)                                                 \
+    do {                                                                         \
+        if (src->_zed && src->_zed->isOpened()) {                                \
+            sl::ERROR_CODE _r = src->_zed->setCameraSettings((ENUM_VAL), (V));   \
+            GST_INFO_OBJECT(src, "live-apply " #ENUM_VAL "=%d -> %s",            \
+                            (int)(V), sl::toString(_r).c_str());                 \
+        }                                                                        \
+    } while (0)
+
+// Push an AUTO_*_RANGE pair. The SDK silently discards ranges where min == max
+// (returns SUCCESS, keeps the old range), so the band is widened to guarantee
+// min < max.
+#define LIVE_APPLY_RANGE(ENUM_VAL, A, B)                                         \
+    do {                                                                         \
+        if (src->_zed && src->_zed->isOpened()) {                                \
+            int _lo = (int)(A);                                                  \
+            int _hi = (int)(B);                                                  \
+            if (_hi <= _lo) {                                                    \
+                _hi = _lo + 1;                                                   \
+            }                                                                    \
+            sl::ERROR_CODE _r = src->_zed->setCameraSettings((ENUM_VAL),         \
+                                                             _lo, _hi);          \
+            GST_INFO_OBJECT(src, "live-apply " #ENUM_VAL "=[%d,%d] -> %s",       \
+                            _lo, _hi, sl::toString(_r).c_str());                 \
+        }                                                                        \
+    } while (0)
+
 void gst_zedxonesrc_set_property(GObject *object, guint property_id, const GValue *value,
                                  GParamSpec *pspec) {
     GstZedXOneSrc *src;
@@ -975,60 +1007,127 @@ void gst_zedxonesrc_set_property(GObject *object, guint property_id, const GValu
         break;
     case PROP_SATURATION:
         src->_saturation = g_value_get_int(value);
+        LIVE_APPLY1(sl::VIDEO_SETTINGS::SATURATION, src->_saturation);
         break;
     case PROP_SHARPNESS:
         src->_sharpness = g_value_get_int(value);
+        LIVE_APPLY1(sl::VIDEO_SETTINGS::SHARPNESS, src->_sharpness);
         break;
     case PROP_GAMMA:
         src->_gamma = g_value_get_int(value);
+        LIVE_APPLY1(sl::VIDEO_SETTINGS::GAMMA, src->_gamma);
         break;
     case PROP_AUTO_WB:
         src->_autoWb = g_value_get_boolean(value);
+        LIVE_APPLY1(sl::VIDEO_SETTINGS::WHITEBALANCE_AUTO, src->_autoWb);
         break;
     case PROP_WB_TEMP:
         src->_manualWb = g_value_get_int(value);
+        if (!src->_autoWb) {
+            LIVE_APPLY1(sl::VIDEO_SETTINGS::WHITEBALANCE_TEMPERATURE, src->_manualWb);
+        }
         break;
     case PROP_AUTO_EXPOSURE:
         src->_autoExposure = g_value_get_boolean(value);
+        // AEC_AGC is the AE/AGC master switch; it covers exposure and gain
+        // together, so all three ctrl-auto-* booleans map onto it.
+        LIVE_APPLY1(sl::VIDEO_SETTINGS::AEC_AGC, src->_autoExposure ? 1 : 0);
+        if (src->_autoExposure) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_EXPOSURE_TIME_RANGE,
+                                src->_exposureRange_min, src->_exposureRange_max);
+        } else {
+            LIVE_APPLY1(sl::VIDEO_SETTINGS::EXPOSURE_TIME, src->_exposure_usec);
+        }
         break;
     case PROP_EXPOSURE:
         src->_exposure_usec = g_value_get_int(value);
+        // Scalar only; the cached range is left alone because the SDK drops a
+        // degenerate [us, us] range and start() would replay it on reopen.
+        if (!src->_autoExposure) {
+            LIVE_APPLY1(sl::VIDEO_SETTINGS::EXPOSURE_TIME, src->_exposure_usec);
+        }
         break;
     case PROP_EXPOSURE_RANGE_MIN:
         src->_exposureRange_min = g_value_get_int(value);
+        if (src->_autoExposure) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_EXPOSURE_TIME_RANGE,
+                           src->_exposureRange_min, src->_exposureRange_max);
+        }
         break;
     case PROP_EXPOSURE_RANGE_MAX:
         src->_exposureRange_max = g_value_get_int(value);
+        if (src->_autoExposure) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_EXPOSURE_TIME_RANGE,
+                           src->_exposureRange_min, src->_exposureRange_max);
+        }
         break;
     case PROP_EXP_COMPENSATION:
         src->_exposureCompensation = g_value_get_int(value);
+        LIVE_APPLY1(sl::VIDEO_SETTINGS::EXPOSURE_COMPENSATION, src->_exposureCompensation);
         break;
     case PROP_AUTO_ANALOG_GAIN:
         src->_autoAnalogGain = g_value_get_boolean(value);
+        if (src->_autoAnalogGain) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_ANALOG_GAIN_RANGE,
+                                src->_analogGainRange_min, src->_analogGainRange_max);
+        } else {
+            LIVE_APPLY1(sl::VIDEO_SETTINGS::ANALOG_GAIN, src->_analogGain);
+        }
         break;
     case PROP_ANALOG_GAIN:
         src->_analogGain = g_value_get_int(value);
+        // Scalar only; see PROP_EXPOSURE for why the range is left alone.
+        if (!src->_autoAnalogGain) {
+            LIVE_APPLY1(sl::VIDEO_SETTINGS::ANALOG_GAIN, src->_analogGain);
+        }
         break;
     case PROP_ANALOG_GAIN_RANGE_MIN:
         src->_analogGainRange_min = g_value_get_int(value);
+        if (src->_autoAnalogGain) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_ANALOG_GAIN_RANGE,
+                           src->_analogGainRange_min, src->_analogGainRange_max);
+        }
         break;
     case PROP_ANALOG_GAIN_RANGE_MAX:
         src->_analogGainRange_max = g_value_get_int(value);
+        if (src->_autoAnalogGain) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_ANALOG_GAIN_RANGE,
+                           src->_analogGainRange_min, src->_analogGainRange_max);
+        }
         break;
     case PROP_AUTO_DIGITAL_GAIN:
         src->_autoDigitalGain = g_value_get_boolean(value);
+        if (src->_autoDigitalGain) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_DIGITAL_GAIN_RANGE,
+                                src->_digitalGainRange_min, src->_digitalGainRange_max);
+        } else {
+            LIVE_APPLY1(sl::VIDEO_SETTINGS::DIGITAL_GAIN, src->_digitalGain);
+        }
         break;
     case PROP_DIGITAL_GAIN:
         src->_digitalGain = g_value_get_int(value);
+        // Scalar only; see PROP_EXPOSURE for why the range is left alone.
+        if (!src->_autoDigitalGain) {
+            LIVE_APPLY1(sl::VIDEO_SETTINGS::DIGITAL_GAIN, src->_digitalGain);
+        }
         break;
     case PROP_DIGITAL_GAIN_RANGE_MIN:
         src->_digitalGainRange_min = g_value_get_int(value);
+        if (src->_autoDigitalGain) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_DIGITAL_GAIN_RANGE,
+                           src->_digitalGainRange_min, src->_digitalGainRange_max);
+        }
         break;
     case PROP_DIGITAL_GAIN_RANGE_MAX:
         src->_digitalGainRange_max = g_value_get_int(value);
+        if (src->_autoDigitalGain) {
+            LIVE_APPLY_RANGE(sl::VIDEO_SETTINGS::AUTO_DIGITAL_GAIN_RANGE,
+                           src->_digitalGainRange_min, src->_digitalGainRange_max);
+        }
         break;
     case PROP_DENOISING:
         src->_denoising = g_value_get_int(value);
+        LIVE_APPLY1(sl::VIDEO_SETTINGS::DENOISING, src->_denoising);
         break;
     case PROP_OUTPUT_RECTIFIED_IMAGE:
         src->_outputRectifiedImage = g_value_get_boolean(value);
@@ -1567,67 +1666,74 @@ static gboolean gst_zedxonesrc_start(GstBaseSrc *bsrc) {
         GST_INFO(" * White balance temperature: %d", src->_manualWb);
     }
 
-    if (src->_autoExposure) {
-        GST_INFO(" * Auto Exposure: TRUE");
-    } else {
-        GST_INFO(" * Auto Exposure: FALSE");
+    // Set the AE/AGC master switch at open time so the camera starts in the
+    // mode the properties describe.
+    ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::AEC_AGC,
+                                       src->_autoExposure ? 1 : 0);
+    if (!check_ret(ret))
+        return FALSE;
+    GST_INFO(" * Auto Exposure (AEC_AGC): %s", src->_autoExposure ? "TRUE" : "FALSE");
+
+    if (!src->_autoExposure) {
         ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::EXPOSURE_TIME, src->_exposure_usec);
         if (!check_ret(ret))
             return FALSE;
         GST_INFO(" * Exposure time: %d", src->_exposure_usec);
-        // Force Exposure range values
-        src->_exposureRange_min = src->_exposure_usec;
-        src->_exposureRange_max = src->_exposure_usec;
+        // The cached range is deliberately not collapsed onto this value; that
+        // would clamp AE to a single value when auto is re-enabled.
     }
+    // Clamp the ceiling to the frame interval, keeping min < max.
     src->_exposureRange_max = std::min(src->_exposureRange_max, 1000000 / src->_realFps);
-    ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::AUTO_EXPOSURE_TIME_RANGE,
-                                       src->_exposureRange_min, src->_exposureRange_max);
-    if (!check_ret(ret))
-        return FALSE;
-    GST_INFO(" * Auto Exposure range: [%d,%d]", src->_exposureRange_min, src->_exposureRange_max);
+    if (src->_exposureRange_max <= src->_exposureRange_min)
+        src->_exposureRange_max = src->_exposureRange_min + 1;
+    // Only meaningful while AE is running.
+    if (src->_autoExposure) {
+        ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::AUTO_EXPOSURE_TIME_RANGE,
+                                           src->_exposureRange_min, src->_exposureRange_max);
+        if (!check_ret(ret))
+            return FALSE;
+        GST_INFO(" * Auto Exposure range: [%d,%d]", src->_exposureRange_min,
+                 src->_exposureRange_max);
+    }
     ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::EXPOSURE_COMPENSATION,
                                        src->_exposureCompensation);
     if (!check_ret(ret))
         return FALSE;
     GST_INFO(" * Exposure compensation: %d", src->_exposureCompensation);
 
+    // Analog gain: scalar in manual, range in auto.
     if (src->_autoAnalogGain) {
-        GST_INFO(" * Auto Analog Gain: TRUE");
+        if (src->_analogGainRange_max <= src->_analogGainRange_min)
+            src->_analogGainRange_max = src->_analogGainRange_min + 1;
+        ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::AUTO_ANALOG_GAIN_RANGE,
+                                           src->_analogGainRange_min, src->_analogGainRange_max);
+        if (!check_ret(ret))
+            return FALSE;
+        GST_INFO(" * Auto Analog Gain range: [%d,%d]", src->_analogGainRange_min,
+                 src->_analogGainRange_max);
     } else {
-        GST_INFO(" * Auto Analog Gain: FALSE");
         ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::ANALOG_GAIN, src->_analogGain);
         if (!check_ret(ret))
             return FALSE;
-        GST_INFO(" * Analog Gain: %d", src->_analogGain);
-        // Force Exposure range values
-        src->_analogGainRange_min = src->_analogGain;
-        src->_analogGainRange_max = src->_analogGain;
+        GST_INFO(" * Analog Gain: %d (auto OFF)", src->_analogGain);
     }
-    ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::AUTO_ANALOG_GAIN_RANGE,
-                                       src->_analogGainRange_min, src->_analogGainRange_max);
-    if (!check_ret(ret))
-        return FALSE;
-    GST_INFO(" * Auto Analog Gain range: [%d,%d]", src->_analogGainRange_min,
-             src->_analogGainRange_max);
 
+    // Digital gain: same treatment.
     if (src->_autoDigitalGain) {
-        GST_INFO(" * Auto Digital Gain: TRUE");
+        if (src->_digitalGainRange_max <= src->_digitalGainRange_min)
+            src->_digitalGainRange_max = src->_digitalGainRange_min + 1;
+        ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::AUTO_DIGITAL_GAIN_RANGE,
+                                           src->_digitalGainRange_min, src->_digitalGainRange_max);
+        if (!check_ret(ret))
+            return FALSE;
+        GST_INFO(" * Auto Digital Gain range: [%d,%d]", src->_digitalGainRange_min,
+                 src->_digitalGainRange_max);
     } else {
-        GST_INFO(" * Auto Digital Gain: FALSE");
         ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::DIGITAL_GAIN, src->_digitalGain);
         if (!check_ret(ret))
             return FALSE;
-        GST_INFO(" * Digital Gain: %d", src->_digitalGain);
-        // Force Exposure range values
-        src->_digitalGainRange_min = src->_digitalGain;
-        src->_digitalGainRange_max = src->_digitalGain;
+        GST_INFO(" * Digital Gain: %d (auto OFF)", src->_digitalGain);
     }
-    ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::AUTO_DIGITAL_GAIN_RANGE,
-                                       src->_digitalGainRange_min, src->_digitalGainRange_max);
-    if (!check_ret(ret))
-        return FALSE;
-    GST_INFO(" * Auto Digital Gain range: [%d,%d]", src->_digitalGainRange_min,
-             src->_digitalGainRange_max);
 
     ret = src->_zed->setCameraSettings(sl::VIDEO_SETTINGS::DENOISING, src->_denoising);
     if (!check_ret(ret))
