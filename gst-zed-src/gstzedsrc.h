@@ -55,6 +55,8 @@ struct _GstZedSrc {
     gint64 camera_sn;
     GString svo_file;
     gboolean svo_real_time_mode;   // SVO playback: real-time pacing (drops frames under load) vs process every frame
+    gboolean force_svga;
+    guint svga_src_height;    // force_svga: image height retrieved from the SDK
     GString opencv_calibration_file;
     GString stream_ip;
     gint stream_port;

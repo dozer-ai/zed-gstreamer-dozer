@@ -61,6 +61,7 @@ enum {
     PROP_CAM_SN,
     PROP_SVO_FILE,
     PROP_SVO_REAL_TIME_MODE,
+    PROP_FORCE_SVGA,
     PROP_OPENCV_CALIB_FILE,
     PROP_STREAM_IP,
     PROP_STREAM_PORT,
@@ -241,6 +242,9 @@ typedef enum {
 #define DEFAULT_PROP_CAM_SN         0
 #define DEFAULT_PROP_SVO_FILE       ""
 #define DEFAULT_PROP_SVO_REAL_TIME_MODE  TRUE
+#define DEFAULT_PROP_FORCE_SVGA     FALSE
+#define SVGA_WIDTH  960
+#define SVGA_HEIGHT 600
 #define DEFAULT_PROP_OPENCV_CALIB_FILE       ""
 #define DEFAULT_PROP_STREAM_IP      ""
 #define DEFAULT_PROP_STREAM_PORT    30000
@@ -874,6 +878,14 @@ static void gst_zedsrc_class_init(GstZedSrcClass *klass) {
                              (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
 
     g_object_class_install_property(
+        gobject_class, PROP_FORCE_SVGA,
+        g_param_spec_boolean("force-svga", "Force SVGA output",
+                             "Output 960x600 (stream-type 4 only) from a ZED X input at any resolution, "
+                             "letterboxing HD1080 so frames match the camera's SVGA calibration",
+                             DEFAULT_PROP_FORCE_SVGA,
+                             (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)));
+    
+    g_object_class_install_property(
         gobject_class, PROP_OPENCV_CALIB_FILE,
         g_param_spec_string("opencv-calibration-file", "Optional OpenCV Calibration File", "Optional OpenCV Calibration File", 
                             DEFAULT_PROP_OPENCV_CALIB_FILE,
@@ -1460,6 +1472,7 @@ static void gst_zedsrc_init(GstZedSrc *src) {
     src->camera_sn = DEFAULT_PROP_CAM_SN;
     src->svo_file = *g_string_new(DEFAULT_PROP_SVO_FILE);
     src->svo_real_time_mode = DEFAULT_PROP_SVO_REAL_TIME_MODE;
+    src->force_svga = DEFAULT_PROP_FORCE_SVGA;
     src->opencv_calibration_file = *g_string_new(DEFAULT_PROP_OPENCV_CALIB_FILE);
     src->stream_ip = *g_string_new(DEFAULT_PROP_STREAM_IP);
 
@@ -1591,6 +1604,9 @@ void gst_zedsrc_set_property(GObject *object, guint property_id, const GValue *v
         break;
     case PROP_SVO_REAL_TIME_MODE:
         src->svo_real_time_mode = g_value_get_boolean(value);
+        break;
+    case PROP_FORCE_SVGA:
+        src->force_svga = g_value_get_boolean(value);
         break;
     case PROP_OPENCV_CALIB_FILE:
         str = g_value_get_string(value);
@@ -1893,6 +1909,9 @@ void gst_zedsrc_get_property(GObject *object, guint property_id, GValue *value, 
         break;
     case PROP_SVO_REAL_TIME_MODE:
         g_value_set_boolean(value, src->svo_real_time_mode);
+        break;
+    case PROP_FORCE_SVGA:
+        g_value_set_boolean(value, src->force_svga);
         break;
     case PROP_OPENCV_CALIB_FILE:
         g_value_set_string(value, src->opencv_calibration_file.str);
@@ -2199,6 +2218,10 @@ static gboolean gst_zedsrc_calculate_caps(GstZedSrc *src) {
 
     width = cam_info.camera_configuration.resolution.width;
     height = cam_info.camera_configuration.resolution.height;
+    if (src->force_svga) {
+        width = SVGA_WIDTH;
+        height = SVGA_HEIGHT;
+    }
 
     if (src->stream_type == GST_ZEDSRC_LEFT_RIGHT || src->stream_type == GST_ZEDSRC_LEFT_DEPTH) {
         height *= 2;
@@ -2357,6 +2380,10 @@ static gboolean gst_zedsrc_start(GstBaseSrc *bsrc) {
     }
     // <---- Set init parameters
 
+    if (src->force_svga) {
+        init_params.maximum_working_resolution = sl::Resolution(SVGA_WIDTH, SVGA_HEIGHT);
+    }
+
     // ----> Open camera
     ret = src->zed.open(init_params);
 
@@ -2364,6 +2391,18 @@ static gboolean gst_zedsrc_start(GstBaseSrc *bsrc) {
         GST_ELEMENT_ERROR(src, RESOURCE, NOT_FOUND,
                           ("Failed to open camera, '%s'", sl::toString(ret).c_str()), (NULL));
         return FALSE;
+    }
+
+    if (src->force_svga) {
+        // ZED X: SVGA is HD1200 halved; HD1080 is HD1200 less 60 rows top and bottom,
+        // so it comes out 960x540 and is letterboxed to 960x600
+        sl::Resolution native = src->zed.getCameraInformation().camera_configuration.resolution;
+        src->svga_src_height = native.height * SVGA_WIDTH / native.width;
+        if (src->stream_type != GST_ZEDSRC_LEFT_DEPTH || src->svga_src_height > SVGA_HEIGHT) {
+            GST_ELEMENT_ERROR(src, RESOURCE, SETTINGS,
+                              ("force-svga needs stream-type 4 and a ZED X input"), (NULL));
+            return FALSE;
+        }
     }
     // <---- Open camera
 
@@ -2848,9 +2887,13 @@ static GstFlowReturn gst_zedsrc_fill(GstPushSrc *psrc, GstBuffer *buf) {
         ret = src->zed.retrieveMeasure(depth_data, sl::MEASURE::DEPTH_U16_MM, sl::MEM::CPU);
         if(!check_ret(ret)) return GST_FLOW_ERROR;
     } else if (src->stream_type == GST_ZEDSRC_LEFT_DEPTH) {
-        ret = src->zed.retrieveImage(left_img, sl::VIEW::LEFT, sl::MEM::CPU);
+        sl::Resolution res(0, 0);  // native size
+        if (src->force_svga) {
+            res = sl::Resolution(SVGA_WIDTH, src->svga_src_height);
+        }
+        ret = src->zed.retrieveImage(left_img, sl::VIEW::LEFT, sl::MEM::CPU, res);
         if(!check_ret(ret)) return GST_FLOW_ERROR;
-        ret = src->zed.retrieveMeasure(depth_data, sl::MEASURE::DEPTH, sl::MEM::CPU);
+        ret = src->zed.retrieveMeasure(depth_data, sl::MEASURE::DEPTH, sl::MEM::CPU, res);
         if(!check_ret(ret)) return GST_FLOW_ERROR;
     }
     // <---- Mats retrieving
@@ -2864,6 +2907,21 @@ static GstFlowReturn gst_zedsrc_fill(GstPushSrc *psrc, GstBuffer *buf) {
 
         // Right RGB data on half bottom
         memcpy((minfo.data + minfo.size / 2), right_img.getPtr<sl::uchar4>(), minfo.size / 2);
+    } else if (src->stream_type == GST_ZEDSRC_LEFT_DEPTH && src->force_svga) {
+        // image on the top half, depth (uint32 mm) on the bottom half, each
+        // centered with zeroed rows above and below
+        guint pad = (SVGA_HEIGHT - src->svga_src_height) / 2;
+        guint8 *depth_out = minfo.data + minfo.size / 2;
+        memset(minfo.data, 0, minfo.size);
+        for (guint y = 0; y < src->svga_src_height; y++) {
+            memcpy(minfo.data + (pad + y) * SVGA_WIDTH * 4,
+                   left_img.getPtr<sl::uchar1>() + y * left_img.getStepBytes(), SVGA_WIDTH * 4);
+            uint32_t *out = (uint32_t *) (depth_out + (pad + y) * SVGA_WIDTH * 4);
+            sl::float1 *in = depth_data.getPtr<sl::float1>() + y * depth_data.getStep();
+            for (guint x = 0; x < SVGA_WIDTH; x++) {
+                out[x] = static_cast<uint32_t>(in[x]);
+            }
+        }
     } else if (src->stream_type == GST_ZEDSRC_LEFT_DEPTH) {
         // RGB data on half top
         memcpy(minfo.data, left_img.getPtr<sl::uchar4>(), minfo.size / 2);
