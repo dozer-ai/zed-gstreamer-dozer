@@ -1,0 +1,84 @@
+name: code-review
+
+# Advisory Claude review of every non-draft PR. Not a required check; it never
+# gates a merge. Copied from project-saturn's code-review.yml, which explains the
+# design in full.
+#
+# The action refuses to run when this file differs from the copy on the default
+# branch -- a prompt-injection guard, since a PR could otherwise rewrite its own
+# reviewer. Expect the claude job to skip green on any PR that edits this file,
+# including the one that adds it. It starts reviewing once merged.
+#
+# Needs the repository secret CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - '**.rst'
+      - '**.bat'
+      - 'scripts/windows/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+  # Required even with claude_code_oauth_token: the action exchanges a GitHub OIDC
+  # token regardless, and fails with "Could not fetch an OIDC token" without it.
+  id-token: write
+
+# A three-commit push fires `synchronize` three times; without this each one
+# starts its own billed review.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          use_sticky_comment: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The repository is Dozer's fork of Stereolabs'
+            zed-gstreamer: C++ GStreamer elements (zedsrc, zedxonesrc, zeddemux,
+            zeddatamux, ...) on the ZED SDK, used by the base station on Jetson
+            Orin NX with ZED-X cameras over GMSL.
+
+            You cannot build or test this tree: the ZED SDK and the Jetson toolchain
+            are not available here. Review statically. Do not ask for build or test
+            output.
+
+            Prioritise, in order:
+
+            1. GStreamer element correctness -- buffer and metadata lifetime, caps
+               negotiation, EOS and flush handling, state-change ordering
+               (NULL/READY/PAUSED/PLAYING) and their error paths.
+            2. ZED SDK camera lifetime -- open/close pairing, grab-thread shutdown,
+               and behaviour when a camera fails to open or drops mid-stream. A bad
+               camera must surface as an error, not hang the pipeline.
+            3. Property compatibility -- the base station sets these elements'
+               properties by name. Flag any renamed or removed property, or a changed
+               default, as breaking for that consumer.
+            4. Upstream divergence -- prefer changes that keep a later merge from
+               Stereolabs' upstream tractable; flag gratuitous churn in untouched code.
+            5. Shell scripts -- numeric vs lexicographic comparison, unquoted
+               expansions, missing shebangs.
+
+            Report only defects you can point at in the diff, with the failure they
+            cause. If a file is clean, say nothing about it. Use inline comments for
+            specific lines and a single top-level comment for anything structural.
+          claude_args: |
+            --model sonnet
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*)"
