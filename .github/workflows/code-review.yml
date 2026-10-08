@@ -50,11 +50,13 @@ env:
 jobs:
   budget:
     # Drafts are for watching CI, not for review; `ready_for_review` picks the PR
-    # up when it is marked ready. Bot PRs are mechanical and get no review.
+    # up when it is marked ready. Bot PRs are mechanical and get no review. PRs
+    # from forks get no secrets and a read-only token, so they would only fail.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
-       github.event.pull_request.user.type != 'Bot')
+       github.event.pull_request.user.type != 'Bot' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

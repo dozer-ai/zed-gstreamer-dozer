@@ -1,4 +1,4 @@
-# Reviewers GitHub requests automatically on every PR. The PR's author is never
-# requested, so each line needs at least two owners to always yield a reviewer.
+# Reviewers GitHub requests automatically on every PR. Who is on the team is
+# managed in the team, not here: https://github.com/orgs/dozer-ai/teams/edge-perception
 
-* @vince-burns @ryan-dozer @anand97
+* @dozer-ai/edge-perception
