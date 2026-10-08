@@ -1,0 +1,13 @@
+name: auto-assign
+
+# Assigns a new PR to its author. The logic lives in dozer-ai/.github, shared by
+# every repo that has this stub.
+on:
+  pull_request:
+    types: [opened, reopened]
+
+jobs:
+  auto-assign:
+    uses: dozer-ai/.github/.github/workflows/auto-assign.yml@main
+    permissions:
+      pull-requests: write
