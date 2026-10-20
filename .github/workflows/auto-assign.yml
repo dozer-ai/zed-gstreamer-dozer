@@ -1,13 +1,30 @@
 name: auto-assign
 
-# Assigns a new PR to its author. The logic lives in dozer-ai/.github, shared by
-# every repo that has this stub.
+# Assigns a new PR to whoever opened it, so the assignee column says who is driving it. A copy of the shared
+# workflow in dozer-ai/.github, which is private: a public repository like this one can't call it.
+#
+# Skipped when a bot opened it (bots can't be assignees), when someone is already assigned, and for PRs from
+# forks: the token is read-only there, and an outside contributor can't be assigned anyway.
+
 on:
   pull_request:
     types: [opened, reopened]
 
+permissions:
+  pull-requests: write
+
 jobs:
-  auto-assign:
-    uses: dozer-ai/.github/.github/workflows/auto-assign.yml@main
-    permissions:
-      pull-requests: write
+  assign-author:
+    if: >-
+      github.event.pull_request.user.type != 'Bot' &&
+      toJSON(github.event.pull_request.assignees) == '[]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: gh api --method POST "repos/$REPO/issues/$PR/assignees" -f "assignees[]=$AUTHOR"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
